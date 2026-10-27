@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>ROSES — Interactive Experience</title>
+  <meta name="description" content="Roses, an interactive audiovisual collage.">
+  <!-- Rhizoma by Dabin Kim / Sativus Gourd, CC BY-SA 4.0. -->
+  <script src="https://sativus-gourd.github.io/rhizoma-smoke/embed/sg-rhizoma.js" defer></script>
+  <script src="assets/manifest.js" onerror="void 0"></script>
+  <style>
+    :root { font-family:Arial,Helvetica,sans-serif; font-synthesis:none; }
+    *,*::before,*::after { box-sizing:border-box }
+    html,body { width:100%;height:100%;margin:0;overflow:hidden }
+    body { background:#000;color:#fff }
+    button { font:inherit;cursor:pointer;-webkit-tap-highlight-color:transparent }
+    button:focus-visible { outline:2px solid currentColor;outline-offset:4px }
+    [hidden] { display:none!important }
+
+    .entry { position:fixed;inset:0;z-index:40;display:grid;place-items:center;
+      overflow:hidden;background:#000;color:#fff;transition:opacity .8s ease,visibility .8s ease }
+    .entry.leaving { opacity:0;visibility:hidden;pointer-events:none }
+    .entry-center { position:relative;width:100%;height:100%;display:grid;place-items:center }
+    .entry-title { position:relative;z-index:1;margin:0;padding:.7em .2em;
+      color:#fff;opacity:1!important;font-family:Georgia,'Times New Roman',serif;
+      font-weight:400;font-size:clamp(68px,13.5vw,190px);line-height:1.12;
+      text-align:center;letter-spacing:-.087em;white-space:nowrap;pointer-events:none;
+      user-select:none;-webkit-user-select:none }
+    .growth-canvas { position:absolute;inset:0;z-index:2;width:100%;height:100%;pointer-events:none }
+    .entry-hit { position:absolute;inset:0;z-index:5;border:0;background:transparent;color:#fff }
+    .entry-hit:focus-visible { outline:2px solid #fff;outline-offset:-13px }
+
+    .experience { position:fixed;inset:0;overflow:hidden;background:#fff;color:#171717;
+      opacity:0;pointer-events:none;transition:opacity .85s ease }
+    .experience.visible { opacity:1;pointer-events:auto }
+    .viewport { position:absolute;inset:0;overflow:hidden;cursor:grab;
+      touch-action:none;user-select:none;-webkit-user-select:none }
+    .viewport.dragging { cursor:grabbing }
+    .stage { position:absolute;inset:0;overflow:hidden;pointer-events:none }
+    .tile { position:absolute;z-index:1;display:block;margin:0;padding:0;border:0;background:#202020;
+      overflow:hidden;pointer-events:auto;transform:translate3d(0,-50%,0) scale(1);
+      transform-origin:center center;transition:transform .27s cubic-bezier(.2,.7,.2,1);
+      outline-offset:5px;cursor:grab;will-change:transform }
+    .tile.photo:hover,.tile.photo:focus-visible { z-index:1000!important;transform:translate3d(0,-50%,0) scale(1.075) }
+    .tile.interview:hover,.tile.interview:focus-visible { transform:translate3d(0,-50%,0) scale(1); }
+    .tile img,.tile video { display:block;width:100%;height:100%;object-fit:cover;
+      pointer-events:none;-webkit-user-drag:none }
+    /* Interviews stay in place: hovering changes the audio, not the collage geometry. */
+    .tile.interview { cursor:default }
+    .tile.interview video { background:#111;object-fit:cover }
+    .tile.interview:focus-visible { outline:2px solid #111;outline-offset:3px }
+    .instructions { position:absolute;z-index:6;bottom:clamp(18px,3vw,40px);
+      left:clamp(18px,3vw,40px);pointer-events:none;
+      font-size:10px;letter-spacing:.18em;color:#fff;mix-blend-mode:difference }
+    .asset-warning { position:absolute;z-index:8;left:50%;top:50%;transform:translate(-50%,-50%);
+      max-width:min(88vw,510px);padding:18px 22px;text-align:center;
+      font-size:12px;line-height:1.9;color:#555;background:#fff;border:1px solid #eee }
+    .asset-warning code { font-family:monospace;color:#222 }
+
+    @media (max-width:760px) {
+      .entry-title { font-size:clamp(55px,15vw,118px);padding:1em .18em }
+      .instructions { font-size:9px }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .entry,.experience,.tile { transition:none!important }
+    }
+  </style>
+</head>
+<body>
+  <section class="entry" id="entry" aria-label="Roses opening">
+    <div class="entry-center">
+      <h1 class="entry-title" id="rosesTitle">Roses</h1>
+      <canvas class="growth-canvas" id="growthCanvas" aria-hidden="true"></canvas>
+      <button class="entry-hit" id="enter" aria-label="Enter Roses experience" type="button"></button>
+    </div>
+  </section>
+
+  <main class="experience" id="experience" aria-label="Roses audiovisual collage" inert>
+    <div class="viewport" id="viewport" tabindex="0" aria-label="Horizontal infinite gallery. Scroll, drag, or press the left and right arrow keys to explore">
+      <div class="stage" id="stage"></div>
+    </div>
+    <div class="instructions">SCROLL / DRAG / ← → TO EXPLORE</div>
+    <div class="asset-warning" id="assetWarning" hidden></div>
+  </main>
+
+  <audio id="soundtrack" src="assets/audio/roses.wav" preload="metadata" loop></audio>
+
+  <script>
+  (() => {
+    'use strict';
+    const get = id => document.getElementById(id);
+    const entry = get('entry'), title = get('rosesTitle'), enter = get('enter');
+    const growthCanvas = get('growthCanvas');
+    const experience = get('experience'), viewport = get('viewport'), stage = get('stage');
+    const soundtrack = get('soundtrack');
+    const assetWarning = get('assetWarning');
+    const prefersLessMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const canHover = matchMedia('(hover: hover) and (pointer: fine)').matches;
+    const MUSIC_VOLUME = 0.85;
+    const DUCKED_VOLUME = 0.08; // Roses stays quietly underneath an interview.
+    const INTERVIEW_VOLUME = 1;
+
+    const custom = window.ROSES_MEDIA || {};
+    const photos = Array.isArray(custom.images) && custom.images.length
+      ? custom.images : Array.from({length:120},(_,i)=>`Frame-${i+1}.jpeg`);
+    const interviews = Array.isArray(custom.videos) && custom.videos.length
+      ? custom.videos : Array.from({length:13},(_,i)=>`interview${i+1}.mp4`);
+    const assetPath = (folder,name) => (/^(https?:|data:|\/)/i.test(name) || name.startsWith('assets/'))
+      ? name : `assets/${folder}/${name.split('/').map(encodeURIComponent).join('/')}`;
+
+    // Keep the collage composition fixed, but shuffle which asset lands in each slot.
+    // This makes the overall order feel mixed while preserving the same layout.
+    function seededRandom(seed) {
+      let t = seed >>> 0;
+      return () => {
+        t += 0x6D2B79F5;
+        let r = Math.imul(t ^ (t >>> 15), 1 | t);
+        r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+        return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+    function shuffleStable(list, seed = 20261028) {
+      const arr = list.slice();
+      const rand = seededRandom(seed);
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+      }
+      return arr;
+    }
+
+    const allMedia = [
+      ...photos.map((name,i)=>({type:'image',src:assetPath('images',name),name,number:i+1})),
+      ...interviews.map((name,i)=>({type:'video',src:assetPath('videos',name),name,number:i+1}))
+    ];
+    const media = shuffleStable(allMedia);
+    media.forEach((item,i)=>{ item.id=i; });
+
+    let entered = false, rhizoma = null;
+    function initRhizoma() {
+      if (typeof window.SGRhizoma?.grow !== 'function') return;
+      try {
+        rhizoma = window.SGRhizoma.grow(title,{face:'roses',seed:202,
+          growth:'12',colour:'#ffffff',scale:1});
+        // Native Rhizoma grows once; the canvas extension below keeps branching
+        // continuously, avoiding an obvious reset every few seconds.
+      } catch (err) { console.warn('Rhizoma unavailable:',err); }
+    }
+    // Defer Rhizoma until its script has had a chance to load.
+    if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',initRhizoma,{once:true});
+    else initRhizoma();
+
+    // Continuous botanical extension for the Rhizoma hero.  The official
+    // embed's grow()/replay() has a finite end, so use canvas branches that
+    // emerge from the actual glyph-outline pixels. This also works if the
+    // remote script fails to load in Safari or on a file:// page.
+    let growthCtx, growthFrame=0, growthLast=0, growthSeeds=[], growthRoots=[];
+    let growthBornAt=0, growthAccumulator=0, growthWidth=0, growthHeight=0;
+    const rootRand=(a,b)=>a+Math.random()*(b-a);
+
+    function setupContinuousGrowth() {
+      if (prefersLessMotion || entered) return;
+      const w=Math.max(1,innerWidth), h=Math.max(1,innerHeight);
+      const dpr=Math.min(devicePixelRatio || 1,2);
+      growthCanvas.width=Math.round(w*dpr);
+      growthCanvas.height=Math.round(h*dpr);
+      growthCtx=growthCanvas.getContext('2d', {alpha:true});
+      if(!growthCtx) return;
+      growthCtx.setTransform(dpr,0,0,dpr,0,0);
+      growthWidth=w;growthHeight=h;
+      growthRoots=[];growthSeeds=[];growthBornAt=performance.now();
+      growthLast=0;growthAccumulator=0;
+
+      // Rasterize the live title into an offscreen mask to find true stroke edges.
+      const off=document.createElement('canvas');off.width=w;off.height=h;
+      const ctx=off.getContext('2d',{willReadFrequently:true});
+      const css=getComputedStyle(title), fs=parseFloat(css.fontSize)||160;
+      const chars=Array.from(title.textContent.trim());
+      const tracking=parseFloat(css.letterSpacing)||0;
+      ctx.font=`${css.fontWeight} ${fs}px ${css.fontFamily}`;
+      ctx.fillStyle='#fff';ctx.textBaseline='alphabetic';
+      const metrics=ctx.measureText(chars.join(''));
+      const width=chars.reduce((n,c)=>n+ctx.measureText(c).width,0)+(chars.length-1)*tracking;
+      const ascent=metrics.actualBoundingBoxAscent||fs*.72;
+      const descent=metrics.actualBoundingBoxDescent||fs*.04;
+      const baseline=h/2+(ascent-descent)/2;
+      let xx=(w-width)/2;
+      for(const ch of chars){ctx.fillText(ch,xx,baseline);xx+=ctx.measureText(ch).width+tracking;}
+      const pixels=ctx.getImageData(0,0,w,h).data;
+      const alpha=(x,y)=>x<0||y<0||x>=w||y>=h?0:pixels[(Math.floor(y)*w+Math.floor(x))*4+3];
+      const step=w<700?4:5;
+      const left=Math.max(5,Math.floor((w-width)/2)-12), right=Math.min(w-5,Math.ceil((w+width)/2)+12);
+      const top=Math.max(5,Math.floor(baseline-ascent-12)), bottom=Math.min(h-5,Math.ceil(baseline+descent+12));
+      for(let y=top;y<bottom;y+=step){
+        for(let x=left;x<right;x+=step){
+          if(alpha(x,y)<130)continue;
+          const nx=alpha(x-5,y)-alpha(x+5,y);
+          const ny=alpha(x,y-5)-alpha(x,y+5);
+          const norm=Math.hypot(nx,ny);
+          if(norm<50)continue;
+          growthSeeds.push({x,y,angle:Math.atan2(ny,nx)});
+        }
+      }
+      // Fallback anchors make sure the animation still works with unusual fonts.
+      if(growthSeeds.length===0){
+        for(let i=0;i<90;i++){
+          const a=(i/90)*Math.PI*2;
+          growthSeeds.push({x:w/2+Math.cos(a)*width*.47,
+            y:h/2+Math.sin(a)*fs*.35,angle:a});
+        }
+      }
+      for(let i=0;i<(w<700?14:24);i++)spawnGrowthRoot();
+      cancelAnimationFrame(growthFrame);
+      growthFrame=requestAnimationFrame(drawGrowth);
+    }
+    function spawnGrowthRoot(parent=null) {
+      if(!growthSeeds.length)return;
+      const seed=parent?{x:parent.x,y:parent.y,angle:parent.angle+rootRand(-1.12,1.12)}
+                       :growthSeeds[Math.floor(Math.random()*growthSeeds.length)];
+      const depth=parent?parent.depth+1:0;
+      const angle=seed.angle+rootRand(-.22,.22);
+      const root={x:seed.x,y:seed.y,angle,depth,points:[{x:seed.x,y:seed.y}],
+        distance:0,limit:rootRand(75,245)*(growthWidth<700?.72:1),
+        speed:rootRand(20,44)*(growthWidth<700?.84:1),
+        sway:rootRand(-.9,.9),born:performance.now(),end:0,
+        weight:rootRand(.7,1.45)/(1+depth*.36), branched:false};
+      growthRoots.push(root);
+    }
+    function drawGrowth(t) {
+      if(entered || !growthCtx) return;
+      const dt=Math.min((t-(growthLast||t))/1000,.07);growthLast=t;
+      const maxRoots=growthWidth<700?150:270;
+      const elapsed=(t-growthBornAt)/1000;
+      growthAccumulator+=dt*(elapsed<18?8:1.6);
+      while(growthAccumulator>=1 && growthRoots.length<maxRoots) {
+        spawnGrowthRoot();growthAccumulator-=1;
+      }
+      growthCtx.clearRect(0,0,growthWidth,growthHeight);
+      let newBranches=[];
+      for(const root of growthRoots) {
+        if(!root.end){
+          const steps=Math.max(1,Math.ceil(root.speed*dt/3));
+          for(let k=0;k<steps;k++){
+            const len=root.speed*dt/steps;
+            root.distance+=len;
+            root.angle+=rootRand(-.06,.06)+root.sway*dt*.16;
+            root.x+=Math.cos(root.angle)*len;
+            root.y+=Math.sin(root.angle)*len;
+            root.points.push({x:root.x,y:root.y});
+          }
+          if(root.distance>root.limit || root.x<0||root.y<0||root.x>growthWidth||root.y>growthHeight){
+            root.end=t;
+          }else if(!root.branched && root.distance>root.limit*.48 && root.depth<2){
+            root.branched=true;
+            if(Math.random()<(root.depth===0?.72:.32))newBranches.push(root);
+          }
+        }
+        const age=(t-root.born)/1000;
+        const fade=age<22?1:Math.max(0,1-(age-22)/15);
+        if(!fade)continue;
+        growthCtx.beginPath();
+        const first=root.points[0];growthCtx.moveTo(first.x,first.y);
+        for(let i=1;i<root.points.length;i++)growthCtx.lineTo(root.points[i].x,root.points[i].y);
+        growthCtx.strokeStyle=`rgba(255,255,255,${(.92-root.depth*.16)*fade})`;
+        growthCtx.lineWidth=root.weight;
+        growthCtx.lineCap='round';growthCtx.lineJoin='round';growthCtx.stroke();
+      }
+      growthRoots=growthRoots.filter(r=>t-r.born<37000);
+      for(const parent of newBranches){if(growthRoots.length<maxRoots)spawnGrowthRoot(parent);}
+      growthFrame=requestAnimationFrame(drawGrowth);
+    }
+    function stopContinuousGrowth(){cancelAnimationFrame(growthFrame);growthFrame=0;}
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',setupContinuousGrowth,{once:true});
+    else setupContinuousGrowth();
+
+    let camera=0,target=0,loopWidth=1,geometry=[],visible=new Map();
+    let previousTime=0,pressed=null,draggedRecently=0,activePreview=null;
+    let resumeMusicAfterPreview=false;
+    let backgroundVolumeTarget=MUSIC_VOLUME, audioLastTime=0;
+    const heldArrows=new Set();
+    let brokenImages=0,loadedImages=0;
+    const failedMedia=new Set();
+
+    // Collage model: a full-bleed, irregular mosaic below a layer of overlapping
+    // photographs and interviews. Every source asset is used exactly once.
+    // Fixed pseudo-random values keep the composition stable while scrolling.
+    function randomFor(n, salt=0) {
+      let t=(n + 1) * 0x9E3779B1 + (salt + 11) * 0x85EBCA77;
+      t=Math.imul(t ^ (t >>> 16), 0x7FEB352D);
+      t=Math.imul(t ^ (t >>> 15), 0x846CA68B);
+      return ((t ^ (t >>> 16)) >>> 0) / 4294967296;
+    }
+    function layout() {
+      const vW=innerWidth, vH=innerHeight;
+      const isMobile=vW<=760;
+      // All thirteen videos remain discoverable on the topmost collage layer.
+      // Roughly one-fifth of the 120 photos also overlap the mosaic.
+      const background=media.filter(item=>item.type==='image' && item.number % 5 !== 3);
+      const foreground=media.filter(item=>item.type==='video' || item.number % 5 === 3);
+      const baseHeight=Math.max(135,Math.min(235,vH*.20));
+      const baseWidth=isMobile ? Math.min(245,baseHeight*1.1) : baseHeight*1.6;
+      loopWidth=Math.max(vW*3.35,background.length*baseWidth*baseHeight/vH);
+
+      // Random recursive rectangular subdivisions produce a continuous,
+      // zero-gap photomontage without repeated horizontal grid lines.
+      let patches=[{x:0,y:0,w:loopWidth,h:vH}];
+      while(patches.length<background.length){
+        let largest=0,score=-1;
+        patches.forEach((r,i)=>{
+          const weighted=r.w*r.h*(.82+randomFor(i,patches.length+39)*.37);
+          if(weighted>score){score=weighted;largest=i;}
+        });
+        const cell=patches.splice(largest,1)[0];
+        const canSplitX=cell.w>=175,canSplitY=cell.h>=145;
+        let horizontal;
+        if(!canSplitX)horizontal=true;
+        else if(!canSplitY)horizontal=false;
+        else if(cell.w/cell.h>1.42)horizontal=false;
+        else if(cell.h/cell.w>1.35)horizontal=true;
+        else horizontal=randomFor(patches.length,largest+71)<.5;
+        const ratio=.37+randomFor(patches.length,largest+91)*.26;
+        if(horizontal){
+          const h=cell.h*ratio;
+          patches.push({x:cell.x,y:cell.y,w:cell.w,h});
+          patches.push({x:cell.x,y:cell.y+h,w:cell.w,h:cell.h-h});
+        } else {
+          const w=cell.w*ratio;
+          patches.push({x:cell.x,y:cell.y,w,h:cell.h});
+          patches.push({x:cell.x+w,y:cell.y,w:cell.w-w,h:cell.h});
+        }
+      }
+      patches.sort((a,b)=>a.x-b.x || a.y-b.y);
+      const next=background.map((item,i)=>{
+        const r=patches[i];
+        return {...item,x:r.x-1,width:r.w+2,y:r.y+r.h/2,height:r.h+2,
+          layer:1+Math.floor(randomFor(item.id,77)*2)};
+      });
+      // Irregular foreground tiles cross patch borders, with varying aspect,
+      // scale and depth: the reference artwork's densely overlapping effect.
+      foreground.forEach((item,i)=>{
+        const jitter=randomFor(item.id,201);
+        const x=((i+.10+jitter*.80)/foreground.length)*loopWidth;
+        const width=isMobile
+          ? 150+randomFor(item.id,203)*Math.min(110,vW*.28)
+          : Math.max(150,Math.min(520, vH*(.17+randomFor(item.id,203)*.38)));
+        const height=isMobile
+          ? Math.min(vH*.43,145+randomFor(item.id,209)*195)
+          : Math.max(130,Math.min(vH*.49,vH*(.17+randomFor(item.id,209)*.30)));
+        const y=height/2+randomFor(item.id,207)*Math.max(0,vH-height);
+        next.push({...item,x,width,height,y,
+          layer:item.type==='video' ? 25+Math.floor(randomFor(item.id,213)*5)
+                                    : 10+Math.floor(randomFor(item.id,213)*10)});
+      });
+      geometry=next;
+      visible.forEach(el=>el.remove());visible.clear();
+      placeVisible();
+    }
+    function bounded(x) {return ((x%loopWidth)+loopWidth)%loopWidth;}
+    function placeVisible() {
+      if(!entered) return;
+      const position=bounded(camera), buffer=Math.min(520,innerWidth*.46);
+      const keep=new Set();
+      for (const item of geometry) {
+        if(failedMedia.has(item.id))continue;
+        let left=item.x-position;
+        if(left+item.width< -buffer) left+=loopWidth;
+        if(left>innerWidth+buffer) left-=loopWidth;
+        if(left+item.width< -buffer || left>innerWidth+buffer) continue;
+        keep.add(item.id);
+        let el=visible.get(item.id);
+        if(!el){el=makeTile(item);visible.set(item.id,el);stage.appendChild(el);}
+        el.style.left=left+'px';
+        el.style.top=item.y+'px';
+        el.style.width=item.width+'px';
+        el.style.height=item.height+'px';
+      }
+      for(const [id,el] of visible) {
+        if(keep.has(id))continue;
+        if(el===activePreview)stopPreview(false);
+        el.remove();visible.delete(id);
+      }
+    }
+    function makeTile(item) {
+      const tile=document.createElement('div');
+      tile.className='tile '+(item.type==='video'?'interview':'photo');
+      if(item.type==='video') tile.tabIndex=0;
+      tile.dataset.id=item.id;
+      if(item.type==='video')tile.setAttribute('aria-label',
+        `Interview ${item.number}. ${canHover?'Hover or focus':'Tap'} to listen.`);
+      tile.style.zIndex=String(item.layer||1);
+      if(item.type==='image') {
+        const image=document.createElement('img');
+        image.src=item.src;image.alt='';image.loading='lazy';image.decoding='async';image.draggable=false;
+        image.onload=()=>{loadedImages++;};
+        image.onerror=()=>{failedMedia.add(item.id);brokenImages++;tile.remove();visible.delete(item.id);maybeWarn();};
+        tile.append(image);
+      } else {
+        const video=document.createElement('video');
+        video.src=item.src;video.muted=true;video.defaultMuted=true;video.loop=true;
+        video.playsInline=true;video.setAttribute('playsinline','');video.preload='metadata';
+        video.setAttribute('aria-hidden','true');
+        // Show a still frame even before the visitor hovers to play.
+        video.addEventListener('loadedmetadata',()=>{
+          if(Number.isFinite(video.duration) && video.duration > .15){
+            try{video.currentTime=Math.min(.15,video.duration*.08)}catch{}
+          }
+        },{once:true});
+        video.addEventListener('error',()=>{
+          if(activePreview===tile) stopPreview(tile);
+          failedMedia.add(item.id);tile.remove();visible.delete(item.id);
+        });
+        tile.append(video);
+        if(canHover){
+          tile.addEventListener('pointerenter',()=>startPreview(tile));
+          tile.addEventListener('pointerleave',()=>stopPreview(tile));
+          // Keyboard users can listen on focus; no interview click or modal action.
+          tile.addEventListener('focus',()=>startPreview(tile));
+          tile.addEventListener('blur',()=>stopPreview(tile));
+        } else {
+          // Touchscreens have no hover. Tapping toggles playback in the tile,
+          // never opens a fullscreen player.
+          tile.addEventListener('pointerup',()=>{
+            if(pressed?.drag || performance.now()-draggedRecently<330)return;
+            if(activePreview===tile)stopPreview(tile);
+            else startPreview(tile);
+          });
+        }
+      }
+      return tile;
+    }
+    function maybeWarn(){
+      if(brokenImages>=3 && loadedImages===0 && !custom.images){
+        assetWarning.innerHTML='이미지를 찾지 못했어요.<br><code>assets/images/Frame-1.jpeg</code> 부터 확인해 주세요.<br>파일명이 다르면 <code>assets/manifest.js</code> 에 실제 파일명을 지정하면 됩니다.';
+        assetWarning.hidden=false;
+      }
+    }
+    function tick(t) {
+      const dt=Math.min(3, (t-previousTime)/16.67||1);previousTime=t;
+      camera+=(target-camera)*(1-Math.pow(.83,dt));
+      if(target>loopWidth*4||target< -loopWidth*4) {
+        const cycles=Math.trunc(target/loopWidth);
+        const shift=cycles*loopWidth;target-=shift;camera-=shift;
+      }
+      // Arrow keys move smoothly while held.
+      if(entered && heldArrows.size){
+        const direction=(heldArrows.has('ArrowRight')?1:0)-(heldArrows.has('ArrowLeft')?1:0);
+        if(direction)move(direction*12*dt);
+      }
+      if(entered)placeVisible();
+      // Audio ducking: ~0.6s fade-down / ~0.9s recovery, with no abrupt cuts.
+      // Frame-rate independent smoothing follows a new hover target immediately.
+      const elapsedMs=Math.min(80, Math.max(0,(t-(audioLastTime||t))));
+      audioLastTime=t;
+      const fadeMs=backgroundVolumeTarget<soundtrack.volume?250:380;
+      const f=1-Math.exp(-elapsedMs/fadeMs);
+      soundtrack.volume += (backgroundVolumeTarget-soundtrack.volume)*f;
+      if(Math.abs(soundtrack.volume-backgroundVolumeTarget)<.002)
+        soundtrack.volume=backgroundVolumeTarget;
+      if(activePreview){
+        const video=activePreview.querySelector('video');
+        if(video){
+          const vf=1-Math.exp(-elapsedMs/170);
+          video.volume=Math.min(INTERVIEW_VOLUME,video.volume+(INTERVIEW_VOLUME-video.volume)*vf);
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+    function move(delta){target+=delta;}
+    viewport.addEventListener('wheel',e=>{
+      if(!entered)return;e.preventDefault();
+      const d=Math.abs(e.deltaX)>Math.abs(e.deltaY)?e.deltaX:e.deltaY;
+      move(d*(e.deltaMode===1?25:1.05));
+    },{passive:false});
+    viewport.addEventListener('pointerdown',e=>{
+      if(!entered||(e.pointerType==='mouse'&&e.button!==0))return;
+      pressed={id:e.pointerId,x:e.clientX,y:e.clientY,lastX:e.clientX,lastY:e.clientY,drag:false};
+    });
+    viewport.addEventListener('pointermove',e=>{
+      if(!pressed||pressed.id!==e.pointerId)return;
+      const dx=e.clientX-pressed.lastX,dy=e.clientY-pressed.lastY;
+      if(!pressed.drag && Math.hypot(e.clientX-pressed.x,e.clientY-pressed.y)>8){
+        pressed.drag=true;viewport.classList.add('dragging');
+        try{viewport.setPointerCapture(e.pointerId)}catch{}
+        stopPreview(false);
+      }
+      if(pressed.drag)move(Math.abs(dx)>Math.abs(dy)?-dx:-dy);
+      pressed.lastX=e.clientX;pressed.lastY=e.clientY;
+    });
+    function releasePointer(e){
+      if(!pressed||e.pointerId!==pressed.id)return;
+      if(pressed.drag)draggedRecently=performance.now();
+      pressed=null;viewport.classList.remove('dragging');
+      try{if(viewport.hasPointerCapture(e.pointerId))viewport.releasePointerCapture(e.pointerId)}catch{}
+    }
+    viewport.addEventListener('pointerup',releasePointer);
+    viewport.addEventListener('pointercancel',releasePointer);
+
+    // Hover gradually ducks the Roses soundtrack instead of pausing it.
+    // The interview fades in and plays at its original size; leaving restores
+    // the soundtrack smoothly at its current playback position.
+    // Safari may reject unmuted hover autoplay: then return to Roses volume.
+    function startPreview(tile){
+      if(!entered||pressed?.drag||activePreview===tile)return;
+      if(activePreview)stopPreview(activePreview,false);
+      const video=tile.querySelector('video');if(!video)return;
+      activePreview=tile;
+      resumeMusicAfterPreview=!soundtrack.paused;
+      backgroundVolumeTarget=DUCKED_VOLUME;
+      video.muted=false;
+      video.volume=0;
+      try { video.currentTime=0; } catch {}
+      const playAttempt=video.play();
+      if(playAttempt && typeof playAttempt.then==='function') {
+        playAttempt.then(()=>{
+          if(activePreview===tile)tile.classList.add('is-playing');
+          else video.pause();
+        }).catch(err=>{
+          console.info('Interview sound was blocked by browser autoplay policy:',err);
+          if(activePreview===tile)stopPreview(tile);
+        });
+      } else tile.classList.add('is-playing');
+    }
+    function stopPreview(tile=null,restoreMusic=true){
+      if(!activePreview || (tile&&tile!==activePreview))return;
+      const previous=activePreview;activePreview=null;
+      const video=previous.querySelector('video');
+      if(video){video.pause();video.muted=true;try{video.currentTime=0}catch{}}
+      previous.classList.remove('is-playing');
+      // Music was never paused by hover, so simply fade its volume back up.
+      if(restoreMusic){
+        backgroundVolumeTarget=MUSIC_VOLUME;
+        resumeMusicAfterPreview=false;
+      }
+    }
+    document.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){heldArrows.clear();stopPreview();return;}
+      // The intro's ENTER key uses the same audio-permitted interaction as a click.
+      if(!entered && e.key==='Enter' && !e.repeat && !e.altKey && !e.ctrlKey && !e.metaKey){
+        e.preventDefault();enterExperience();return;
+      }
+      if(!entered||e.altKey||e.ctrlKey||e.metaKey)return;
+      if(e.target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName||''))return;
+      // Space toggles the Roses soundtrack throughout the collage.
+      // If an interview is currently previewing, stop it first so audio never overlaps.
+      if(e.code==='Space' || e.key===' '){
+        e.preventDefault();
+        if(e.repeat)return;
+        if(activePreview) stopPreview();
+        if(soundtrack.paused) soundtrack.play().catch(()=>{});
+        else soundtrack.pause();
+        return;
+      }
+      if(e.key!=='ArrowRight'&&e.key!=='ArrowLeft')return;
+      e.preventDefault();
+      if(!heldArrows.has(e.key))move(e.key==='ArrowRight'?110:-110);
+      heldArrows.add(e.key);
+    });
+    document.addEventListener('keyup',e=>{heldArrows.delete(e.key);});
+    window.addEventListener('blur',()=>heldArrows.clear());
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)heldArrows.clear();});
+
+    soundtrack.volume=MUSIC_VOLUME;
+    function enterExperience(){
+      if(entered)return;
+      entered=true;
+      stopContinuousGrowth();
+      experience.inert=false;experience.classList.add('visible');
+      entry.classList.add('leaving');
+      // Synchronous from click/Enter so the browser allows soundtrack audio.
+      soundtrack.play().catch(err=>console.info('Audio did not start:',err));
+      placeVisible();
+      viewport.focus({preventScroll:true});
+      setTimeout(()=>{entry.hidden=true;rhizoma?.stop?.();},850);
+    }
+    enter.addEventListener('click',enterExperience);
+    let pendingResize;
+    addEventListener('resize',()=>{
+      clearTimeout(pendingResize);pendingResize=setTimeout(()=>{
+        layout();if(!entered)setupContinuousGrowth();
+      },120);
+    });
+    layout();requestAnimationFrame(tick);
+  })();
+  </script>
+</body>
+</html>
