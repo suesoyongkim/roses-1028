@@ -21,7 +21,11 @@
     .entry { position:fixed;inset:0;z-index:40;display:grid;place-items:center;
       overflow:hidden;background:#000;color:#fff;transition:opacity .8s ease,visibility .8s ease }
     .entry.leaving { opacity:0;visibility:hidden;pointer-events:none }
-    .entry-center { position:relative;width:100%;height:100%;display:grid;place-items:center }
+    /* The page begins pure black; the Roses hero slowly reveals itself.
+       Asset preloading runs independently behind the entry screen. */
+    .entry-center { position:relative;width:100%;height:100%;display:grid;place-items:center;
+      opacity:0;animation:roses-reveal 1.8s cubic-bezier(.25,.65,.25,1) .25s forwards }
+    @keyframes roses-reveal { from { opacity:0 } to { opacity:1 } }
     .entry-title { position:relative;z-index:1;margin:0;padding:.7em .2em;
       color:#fff;opacity:1!important;font-family:Georgia,'Times New Roman',serif;
       font-weight:400;font-size:clamp(68px,13.5vw,190px);line-height:1.12;
@@ -46,6 +50,10 @@
     .tile.interview:hover,.tile.interview:focus-visible { transform:translate3d(0,-50%,0) scale(1); }
     .tile img,.tile video { display:block;width:100%;height:100%;object-fit:cover;
       pointer-events:none;-webkit-user-drag:none }
+    /* Loaded photographs appear gently instead of flashing as black rectangles. */
+    .tile.photo { background:#fff }
+    .tile.photo img { opacity:0;transition:opacity .22s ease-out }
+    .tile.photo.is-loaded img { opacity:1 }
     /* Interviews stay in place: hovering changes the audio, not the collage geometry. */
     .tile.interview { cursor:default }
     .tile.interview video { background:#111;object-fit:cover }
@@ -63,7 +71,8 @@
       .instructions { font-size:9px }
     }
     @media (prefers-reduced-motion: reduce) {
-      .entry,.experience,.tile { transition:none!important }
+      .entry,.experience,.tile,.tile.photo img { transition:none!important }
+      .entry-center { opacity:1;animation:none!important }
     }
   </style>
 </head>
@@ -282,6 +291,75 @@
     let brokenImages=0,loadedImages=0;
     const failedMedia=new Set();
 
+    // Start downloading a limited set of first-screen photos while the visitor
+    // watches the black intro. Do not queue all 120 JPEGs at once.
+    let warmupStarted=false;
+    const warmupCache=new Map();
+    function warmFirstScreen() {
+      if(warmupStarted || entered || !geometry.length)return;
+      warmupStarted=true;
+      const across=geometry.filter(item=>{
+        if(item.type!=='image')return false;
+        const x=((item.x%loopWidth)+loopWidth)%loopWidth;
+        return x<innerWidth+110 || x+item.width>loopWidth-110;
+      });
+      const top=across.filter(item=>item.layer>=10).sort((a,b)=>b.layer-a.layer).slice(0,8);
+      const base=across.filter(item=>item.layer<10)
+        .sort((a,b)=>b.width*b.height-a.width*a.height).slice(0,10);
+      const queue=[...base.slice(0,5),...top,...base.slice(5)];
+      let cursor=0, inflight=0;
+      const next=()=>{
+        while(inflight<4 && cursor<queue.length){
+          const item=queue[cursor++];
+          if(warmupCache.has(item.src))continue;
+          const img=new Image();
+          img.decoding='async';
+          img.loading='eager';
+          img.fetchPriority=cursor<=7?'high':'auto';
+          warmupCache.set(item.src,img);
+          inflight++;
+          const done=()=>{inflight--;next();};
+          img.onload=done;img.onerror=done;
+          img.src=item.src;
+        }
+      };
+      next();
+    }
+
+    // Limit simultaneous full-size photo requests. The first view may contain
+    // dozens of overlapping tiles, so loading every JPEG at once would compete
+    // with the images the visitor actually sees first.
+    const imageQueue=[];
+    let activeImageRequests=0;
+    const MAX_IMAGE_REQUESTS=6;
+    function queueImageLoad(tile,image,item,priority) {
+      imageQueue.push({tile,image,item,priority});
+      imageQueue.sort((a,b)=>b.priority-a.priority);
+      queueMicrotask(pumpImageQueue);
+    }
+    function pumpImageQueue() {
+      while(activeImageRequests<MAX_IMAGE_REQUESTS && imageQueue.length) {
+        const task=imageQueue.shift();
+        if(!task.tile.isConnected)continue;
+        const {tile,image,item}=task;
+        activeImageRequests++;
+        let finished=false;
+        const finish=()=>{
+          if(finished)return;
+          finished=true;
+          activeImageRequests--;
+          pumpImageQueue();
+        };
+        image.onload=()=>{loadedImages++;tile.classList.add('is-loaded');finish();};
+        image.onerror=()=>{
+          failedMedia.add(item.id);brokenImages++;
+          tile.remove();visible.delete(item.id);maybeWarn();finish();
+        };
+        image.src=item.src;
+        if(image.complete && image.naturalWidth){tile.classList.add('is-loaded');finish();}
+      }
+    }
+
     // Collage model: a full-bleed, irregular mosaic below a layer of overlapping
     // photographs and interviews. Every source asset is used exactly once.
     // Fixed pseudo-random values keep the composition stable while scrolling.
@@ -369,7 +447,7 @@
         if(left+item.width< -buffer || left>innerWidth+buffer) continue;
         keep.add(item.id);
         let el=visible.get(item.id);
-        if(!el){el=makeTile(item);visible.set(item.id,el);stage.appendChild(el);}
+        if(!el){el=makeTile(item,left);visible.set(item.id,el);stage.appendChild(el);}
         el.style.left=left+'px';
         el.style.top=item.y+'px';
         el.style.width=item.width+'px';
@@ -381,7 +459,7 @@
         el.remove();visible.delete(id);
       }
     }
-    function makeTile(item) {
+    function makeTile(item,left=0) {
       const tile=document.createElement('div');
       tile.className='tile '+(item.type==='video'?'interview':'photo');
       if(item.type==='video') tile.tabIndex=0;
@@ -391,10 +469,22 @@
       tile.style.zIndex=String(item.layer||1);
       if(item.type==='image') {
         const image=document.createElement('img');
-        image.src=item.src;image.alt='';image.loading='lazy';image.decoding='async';image.draggable=false;
-        image.onload=()=>{loadedImages++;};
-        image.onerror=()=>{failedMedia.add(item.id);brokenImages++;tile.remove();visible.delete(item.id);maybeWarn();};
+        const onScreen=left+item.width>0 && left<innerWidth;
+        // Anything already onscreen must load eagerly; lazy loading inside this
+        // manually positioned, transformed gallery causes needless delays.
+        image.alt='';image.loading=onScreen?'eager':'lazy';
+        image.decoding='async';image.fetchPriority=onScreen?'high':'low';
+        image.draggable=false;
         tile.append(image);
+        if(onScreen){
+          const priority=item.layer>=10?200+item.layer:100+Math.min(90,item.width*item.height/8000);
+          queueImageLoad(tile,image,item,priority);
+        }else{
+          // Offscreen buffer tiles may load when the browser approaches them.
+          image.onload=()=>{loadedImages++;tile.classList.add('is-loaded');};
+          image.onerror=()=>{failedMedia.add(item.id);brokenImages++;tile.remove();visible.delete(item.id);maybeWarn();};
+          image.src=item.src;
+        }
       } else {
         const video=document.createElement('video');
         video.src=item.src;video.muted=true;video.defaultMuted=true;video.loop=true;
@@ -580,7 +670,10 @@
         layout();if(!entered)setupContinuousGrowth();
       },120);
     });
-    layout();requestAnimationFrame(tick);
+    layout();
+    // This runs while the visitor is still watching the intro fade-in.
+    warmFirstScreen();
+    requestAnimationFrame(tick);
   })();
   </script>
 </body>
